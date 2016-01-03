@@ -4,7 +4,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
-#include <stdio.h>
 
 #include "lodepng.h"
 
@@ -19,29 +18,11 @@
 	GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
 #define TEXTURE_TRANSFER_FLAGS \
-	(GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) | \
+	(GX_TRANSFER_FLIP_VERT(1) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) | \
 	GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) | \
 	GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
-//---------------------------------------------------------------------------------
-void* lodepng_malloc(size_t size) {
-//---------------------------------------------------------------------------------
-  return linearAlloc(size);
-}
-
-//---------------------------------------------------------------------------------
-void* lodepng_realloc(void* ptr, size_t new_size) {
-//---------------------------------------------------------------------------------
-  return linearRealloc(ptr, new_size);
-}
-
-//---------------------------------------------------------------------------------
-void lodepng_free(void* ptr) {
-//---------------------------------------------------------------------------------
-  linearFree(ptr);
-}
-
-#define NUM_SPRITES 128
+#define NUM_SPRITES 256
 
 //simple sprite struct
 typedef struct {
@@ -52,30 +33,41 @@ typedef struct {
 
 Sprite sprites[NUM_SPRITES];
 
+struct { float left, right, top, bottom; } images[4] = {
+	{0.0f, 0.5f, 0.0f, 0.5f},
+	{0.5f, 1.0f, 0.0f, 0.5f},
+	{0.0f, 0.5f, 0.5f, 1.0f},
+	{0.5f, 1.0f, 0.5f, 1.0f},
+};
 
 //---------------------------------------------------------------------------------
 void drawSprite( int x, int y, int width, int height, int image ) {
 //---------------------------------------------------------------------------------
 
+	float left = images[image].left;
+	float right = images[image].right;
+	float top = images[image].top;
+	float bottom = images[image].bottom;
+
 	// Draw a textured quad directly
 	C3D_ImmDrawBegin(GPU_TRIANGLES);
 		C3D_ImmSendAttrib(x, y, 0.5f, 0.0f); // v0=position
-		C3D_ImmSendAttrib( 0.0f, 0.0f, 0.0f, 0.0f);
+		C3D_ImmSendAttrib( left, top, 0.0f, 0.0f);
 
 		C3D_ImmSendAttrib(x+width, y+height, 0.5f, 0.0f);
-		C3D_ImmSendAttrib( 1.0f, 1.0f, 0.0f, 0.0f);
+		C3D_ImmSendAttrib( right, bottom, 0.0f, 0.0f);
 
 		C3D_ImmSendAttrib(x+width, y, 0.5f, 0.0f);
-		C3D_ImmSendAttrib( 1.0f, 0.0f, 0.0f, 0.0f);
+		C3D_ImmSendAttrib( right, top, 0.0f, 0.0f);
 
 		C3D_ImmSendAttrib(x, y, 0.5f, 0.0f); // v0=position
-		C3D_ImmSendAttrib( 0.0f, 0.0f, 0.0f, 0.0f);
+		C3D_ImmSendAttrib( left, top, 0.0f, 0.0f);
 
 		C3D_ImmSendAttrib(x, y+height, 0.5f, 0.0f);
-		C3D_ImmSendAttrib( 0.0f, 1.0f, 0.0f, 0.0f);
+		C3D_ImmSendAttrib( left, bottom, 0.0f, 0.0f);
 
 		C3D_ImmSendAttrib(x+width, y+height, 0.5f, 0.0f);
-		C3D_ImmSendAttrib( 1.0f, 1.0f, 0.0f, 0.0f);
+		C3D_ImmSendAttrib( right, bottom, 0.0f, 0.0f);
 
 
 	C3D_ImmDrawEnd();
@@ -121,18 +113,37 @@ static void sceneInit(void) {
 	unsigned char* image;
 	unsigned width, height;
 
-	lodepng_decode32(&image, &width, &height, ballsprites_png, ballsprites_png_size);
-	GSPGPU_FlushDataCache(image, width*height*4);
+	LodePNGState state;
+
+	lodepng_state_init(&state);
+
+	lodepng_decode(&image, &width, &height, &state, ballsprites_png, ballsprites_png_size);
+
+	u8 *gpusrc = linearAlloc(width*height*4);
+
+	u8* src=image; u8 *dst=gpusrc;
+	for(int i = 0; i<width*height; i++) {
+		int r = *src++;
+		int g = *src++;
+		int b = *src++;
+		int a = *src++;
+
+		*dst++ = a;
+		*dst++ = b;
+		*dst++ = g;
+		*dst++ = r;
+	}
+	GSPGPU_FlushDataCache(gpusrc, width*height*4);
 
 	// Load the texture and bind it to the first texture unit
-	C3D_TexInit(&spritesheet_tex, 64, 64, GPU_RGBA8);
-	GX_TextureCopy ((u32*)image, GX_BUFFER_DIM(width,height), (u32*)spritesheet_tex.data, GX_BUFFER_DIM(width,height), width*height*4, TEXTURE_TRANSFER_FLAGS);
+	C3D_TexInit(&spritesheet_tex, width, height, GPU_RGBA8);
+	GX_DisplayTransfer ((u32*)gpusrc, GX_BUFFER_DIM(width,height), (u32*)spritesheet_tex.data, GX_BUFFER_DIM(width,height), TEXTURE_TRANSFER_FLAGS);
 	gspWaitForPPF();
-	//C3D_TexUpload(&spritesheet_tex, texture);
 	C3D_TexSetFilter(&spritesheet_tex, GPU_LINEAR, GPU_NEAREST);
 	C3D_TexBind(0, &spritesheet_tex);
 
-	lodepng_free(image);
+	free(image);
+	linearFree(gpusrc);
 
 	// Configure the first fragment shading substage to just pass through the texture color
 	// See https://www.opengl.org/sdk/docs/man2/xhtml/glTexEnv.xml for more insight
